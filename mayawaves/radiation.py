@@ -7,11 +7,18 @@ from scipy.ndimage import uniform_filter1d
 from scipy.signal import butter, filtfilt
 from scipy.signal.windows import blackmanharris
 import math
+import os
 
 
 class Frame(Enum):
     RAW = 1
     COM_CORRECTED = 2
+
+class ExtrapolationMethod(Enum):
+    PERTURBATIVE = 1
+    ANALYTIC = 2
+    SPECTRE_CCE = 3
+    PITTNULL_CCE = 4
 
 
 class RadiationBundle:
@@ -19,9 +26,16 @@ class RadiationBundle:
 
     def __init__(self, radiation_spheres: dict):
         self.__radiation_spheres = radiation_spheres
-        self.__extrapolated_sphere = None
+        self.__extrapolated_spheres = {ExtrapolationMethod.PERTURBATIVE: None, ExtrapolationMethod.ANALYTIC: None, ExtrapolationMethod.SPECTRE_CCE: None, ExtrapolationMethod.PITTNULL_CCE: None}
+        self.__extrapolation_method = ExtrapolationMethod.PERTURBATIVE
         self.__radius_for_extrapolation = None
         self.__frame = Frame.RAW
+        self.__spectre_cce_filename = None
+        self.__pittnull_data_directory = None
+        self.__cce_worldtube_radius = None
+        self.__superrest_t0 = None
+        self.__superrest_padding = None
+        self.__superrest_orbits = None
 
     @staticmethod
     def create_radiation_bundle(radiation_group: h5py.Group):
@@ -79,8 +93,8 @@ class RadiationBundle:
             return
         for radiation_sphere in self.radiation_spheres.values():
             radiation_sphere.set_frame(new_frame, time=time, center_of_mass=center_of_mass)
-        if self.__extrapolated_sphere is not None:
-            self.__extrapolated_sphere.set_frame(new_frame, time=time, center_of_mass=center_of_mass)
+        if self.extrapolated_sphere is not None:
+            self.extrapolated_sphere.set_frame(new_frame, time=time, center_of_mass=center_of_mass)
         self.__frame = new_frame
 
     @property
@@ -92,9 +106,75 @@ class RadiationBundle:
     def extrapolated_sphere(self):
         """The RadiationSphere with extrapolated radius. All :math:`\Psi_4` data has been extrapolated to infinite
         radius using the method described in https://arxiv.org/abs/1008.4360 and https://arxiv.org/abs/1108.4421."""
-        if self.__extrapolated_sphere is None:
+        if self.__extrapolated_spheres[self.__extrapolation_method] is None:
             self.create_extrapolated_sphere()
-        return self.__extrapolated_sphere
+        return self.__extrapolated_spheres[self.__extrapolation_method]
+
+    @property
+    def extrapolation_method(self):
+        """Method to use for extrapolation to infinite radius"""
+        return self.__extrapolation_method
+
+    def set_extrapolation_method(self, new_extrapolation_method: ExtrapolationMethod, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None):
+        """Set the method to use for extrapolation to infinite radius.
+
+        Options given by the ExtrapolationMethod enum are perturbative, analytic, or cauchy characteristic evolution.
+        In the case of CCE, the user will need to provide the data output by CCE in spectre_cce_filename.
+
+        Args:
+            new_extrapolation_method (ExtrapolationMethod): Method to use for extrapolation
+            spectre_cce_filename (:obj:`str`, optional): Filename with the CCE output data
+            pittnull_data_directory (:obj:`str`, optional): Directory with the PITTNull CCE output data
+            cce_worldtube_radius (:obj:`float`, optional): Radius of the CCE worldtube data
+            superrest_t0 (:obj:`float`, optional): Center of window for the superrest transformation
+            superrest_padding (:obj:`float`, optional): Padding to either side of t0 for the superrest transformation
+            superrest_orbits (:obj:`float`, optional): Number of orbits over which to compute the superrest transformation
+
+        """
+        if type(new_extrapolation_method) != ExtrapolationMethod:
+            warnings.warn("You must provide the extrapolation method as an ExtrapolationMethod enum value")
+        if new_extrapolation_method == ExtrapolationMethod.SPECTRE_CCE and (spectre_cce_filename is None or cce_worldtube_radius is None):
+            warnings.warn("You must provide a spectre_cce_filename with the CCE output data and the cce_worldtube_radius for SpECTRE CCE extrapolation method")
+            return
+        if new_extrapolation_method == ExtrapolationMethod.PITTNULL_CCE and (pittnull_data_directory is None or cce_worldtube_radius is None):
+            warnings.warn("You must provide a pittnull_data_directory with the CCE output data and the cce_worldtube_radius for PITTNull CCE extrapolation method")
+            return
+        if new_extrapolation_method == ExtrapolationMethod.SPECTRE_CCE and (not self.spectre_cce_filename == spectre_cce_filename or not self.superrest_t0 == superrest_t0 or not self.superrest_padding==superrest_padding or not self.superrest_orbits==superrest_orbits):
+            self.__extrapolated_spheres[ExtrapolationMethod.SPECTRE_CCE] = None
+        if new_extrapolation_method == ExtrapolationMethod.PITTNULL_CCE and not self.pittnull_data_directory == pittnull_data_directory:
+            self.__extrapolated_spheres[ExtrapolationMethod.PITTNULL_CCE] = None
+        self.__extrapolation_method = new_extrapolation_method
+        self.__spectre_cce_filename = spectre_cce_filename
+        self.__pittnull_data_directory = pittnull_data_directory
+        self.__cce_worldtube_radius = cce_worldtube_radius
+        self.__superrest_t0 = superrest_t0
+        self.__superrest_padding = superrest_padding
+        self.__superrest_orbits = superrest_orbits
+        print(self.extrapolation_method)
+
+    @property
+    def spectre_cce_filename(self):
+        return self.__spectre_cce_filename
+
+    @property
+    def pittnull_data_directory(self):
+        return self.__pittnull_data_directory
+
+    @property
+    def cce_worldtube_radius(self):
+        return self.__cce_worldtube_radius
+
+    @property
+    def superrest_t0(self):
+        return self.__superrest_t0
+
+    @property
+    def superrest_padding(self):
+        return self.__superrest_padding
+
+    @property
+    def superrest_orbits(self):
+        return self.__superrest_orbits
 
     @property
     def radius_for_extrapolation(self) -> float:
@@ -578,26 +658,199 @@ class RadiationBundle:
 
         return time, linear_momentum_radiated
 
-    def create_extrapolated_sphere(self, order: int = 2):
-        """Create a RadiationSphere object extrapolated from the RadiationSphere at the provided radius for
-        extrapolation.
+    def _compute_default_superrest_window(self, time: np.ndarray, strain: np.ndarray, orbits: float = 4) -> tuple:
+        post_junk_time = 100 #+self.cce_worldtube_radius
 
-        Extrapolate the :math:`\Psi_4` of all RadiationModes in the RadiationSphere at the set radius for extrapolation
-        to infinite radius and create and store a new RadiationSphere with those extrapolated RadiationModes. Uses
+        import matplotlib.pyplot as plt
+        plt.plot(time, np.real(strain))
+        plt.plot(time, np.imag(strain))
+        plt.axvline(x=0)
+        plt.axvline(x=75)
+        plt.show()
+
+        post_junk_iter = np.argmax(time > post_junk_time)
+        phase = np.abs(np.unwrap(np.atan2(np.imag(strain), np.real(strain))))
+        after_desired_orbits_iter = np.argmax(phase >= phase[post_junk_iter] + 2 * np.pi * (orbits*2))
+        plt.plot(time, phase)
+        plt.show()
+
+        superrest_padding = (time[after_desired_orbits_iter] - time[post_junk_iter]) / 2
+        superrest_t0 = time[post_junk_iter] + superrest_padding
+
+        plt.plot(time, np.real(strain))
+        plt.axvline(x=superrest_t0)
+        plt.axvline(x=superrest_t0 - superrest_padding)
+        plt.axvline(x=superrest_t0 + superrest_padding)
+        plt.show()
+
+        print(orbits, superrest_t0, superrest_padding)
+        return superrest_t0, superrest_padding
+
+    def _create_extrapolated_sphere_from_SpECTRE_CCE_data(self):
+        print('creating extrapolated sphere from SpECTRE CCE data')
+        from scri import SpEC
+        time_array = self.get_time(self.included_radii[0])
+        dt = time_array[1] - time_array[0]
+
+        #superrest_t0 = 1000 #200 # 1000 for D12
+        #superrest_padding = 800 #100 # change for D12... maybe to 600?
+
+        abd = SpEC.file_io.create_abd_from_h5("SpECTRECCE_v1", file_name=self.spectre_cce_filename)
+        cce_times = np.arange(abd.time[0], abd.time[-1], step=dt)
+        abd = SpEC.file_io.create_abd_from_h5(
+            "SpECTRECCE_v1", file_name=self.spectre_cce_filename, t_interpolate=cce_times
+        )
+
+        if self.superrest_t0 is not None and self.superrest_padding is not None:
+            if self.superrest_orbits is not None:
+                raise ValueError("Both windowing times and orbit count are input. Please provide either superrest_orbits or both superrest_t0 and superrest_padding or none of the above to use the defaults.")
+            superrest_t0 = self.superrest_t0
+            superrest_padding = self.superrest_padding
+        else:
+            h = abd.h
+            time = h.t.copy()
+            if self.superrest_orbits is None:
+                superrest_t0, superrest_padding = self._compute_default_superrest_window(time, h.data[:, h.index(2, 2)])
+            else:
+                superrest_t0, superrest_padding = self._compute_default_superrest_window(time, h.data[:, h.index(2, 2)], self.superrest_orbits)
+
+        superrest_dt = 5.0
+
+        abd_for_bms = abd.interpolate(
+            np.arange(
+                superrest_t0 - 1.1 * superrest_padding,
+                superrest_t0 + 1.1 * superrest_padding,
+                step=superrest_dt,
+            )
+        )
+        _, BMS, _ = abd_for_bms.map_to_superrest_frame(
+            t_0=superrest_t0, padding_time=superrest_padding
+        )
+        abd = abd.transform(
+            supertranslation=BMS.supertranslation,
+            frame_rotation=BMS.frame_rotation.components,
+            boost_velocity=BMS.boost_velocity,
+        )
+        h = abd.h
+
+        from scri import asymptotic_bondi_data
+        def plot_bondi_constraints(abd: asymptotic_bondi_data,
+                                   t_lim=[0, 3000],
+                                   t_scale: float = 1):
+            import matplotlib.pyplot as plt
+            bondi_violation_norms = abd.bondi_violation_norms
+            labels = [r"$|\dot{\psi}_0|$",
+                      r"$|\dot{\psi}_1|$",
+                      r"$|\dot{\psi}_2|$",
+                      r"$|\psi_3|$",
+                      r"$|\psi_4|$",
+                      r"$|\mathrm{Im}[\psi_2]|$"]
+            for i in range(len(labels)):
+                plt.plot(abd.h.t * t_scale, bondi_violation_norms[i],
+                         label=labels[i])
+            plt.semilogy()
+            plt.legend()
+            plt.xlim(np.asarray(t_lim) * t_scale)
+            # plt.ylim(1e-5,1)
+            plt.show()
+
+        def plot_bianchi_identities(abd: asymptotic_bondi_data,
+                                   t_lim=[0, 3000],
+                                   t_scale: float = 1):
+            import matplotlib.pyplot as plt
+            lhs_0, rhs_0 = abd.bianchi_0()
+            lhs_1, rhs_1 = abd.bianchi_1()
+            lhs_2, rhs_2 = abd.bianchi_2()
+            print('bianchi_identitiy shapes', lhs_0.shape)
+
+            plt.plot(abd.h.t * t_scale, lhs_0, label='Bianchi_0', c='r')
+            plt.plot(abd.h.t * t_scale, rhs_0, label='Bianchi_0', c='r', linestyle='--')
+            plt.plot(abd.h.t * t_scale, lhs_1, label='Bianchi_1', c='g')
+            plt.plot(abd.h.t * t_scale, rhs_1, label='Bianchi_1', c='g', linestyle='--')
+            plt.plot(abd.h.t * t_scale, lhs_2, label='Bianchi_2', c='b')
+            plt.plot(abd.h.t * t_scale, rhs_2, label='Bianchi_2', c='b', linestyle='--')
+            #plt.semilogy()
+            plt.legend()
+            plt.xlim(np.asarray(t_lim) * t_scale)
+            # plt.ylim(1e-5,1)
+            plt.show()
+
+
+
+        plot_bondi_constraints(abd)
+        plot_bianchi_identities(abd)
+
+        psi4 = abd.psi4
+        time = h.t.copy()
+        temp_modes = {}
+        print(self.included_modes)
+        for mode in self.included_modes:
+            if(mode[0]<2):
+                continue
+            strain_real = np.real(h.data[:, h.index(*mode)])
+            strain_imag = np.imag(h.data[:, h.index(*mode)])
+            psi4_data = np.array(psi4.data)
+            psi4_real = np.real(psi4_data[:, psi4.index(*mode)])
+            psi4_imag = np.imag(psi4_data[:, psi4.index(*mode)])
+            temp_modes[(mode[0], mode[1])] = RadiationMode(psi4_real=psi4_real, psi4_imaginary=psi4_imag, strain_plus=strain_real, strain_cross=strain_imag, l=mode[0], m=mode[1],
+                             rad=self.cce_worldtube_radius, time=time, extrapolated=True)
+        extrap_sphere = RadiationSphere(mode_dict=temp_modes, time=time, radius=self.cce_worldtube_radius,
+                                        extrapolated=True)
+        self.__extrapolated_spheres[ExtrapolationMethod.SPECTRE_CCE] = extrap_sphere
+
+    def _create_extrapolated_sphere_from_PITTNull_CCE_data(self):
+        print('creating extrapolated sphere from PITTNull CCE data')
+        modes = {}
+        for mode in self.included_modes:
+            l, m = mode
+            if m >= 0:
+                psi4_filename = os.path.join(self.pittnull_data_directory, f'Psi4_scri.L{l:02d}Mp{m:02d}.asc')
+            else:
+                psi4_filename = os.path.join(self.pittnull_data_directory, f'Psi4_scri.L{l:02d}Mm{m:02d}.asc')
+            if not os.path.isfile(psi4_filename):
+                continue
+            psi4_time, psi4_real, psi4_imag = np.loadtxt(psi4_filename, unpack=True)
+            modes[(l, m)] = RadiationMode(psi4_real=psi4_real, psi4_imaginary=psi4_imag, l=l, m=m,
+                                                           rad=self.cce_worldtube_radius, time=psi4_time, extrapolated=True)
+        extrap_sphere = RadiationSphere(mode_dict=modes, time=psi4_time, radius=self.cce_worldtube_radius, extrapolated=True)
+        self.__extrapolated_spheres[ExtrapolationMethod.PITTNULL_CCE] = extrap_sphere
+
+    def create_extrapolated_sphere(self, order: int = 2):
+        """Create a RadiationSphere object extrapolated to infinity using the set extrapolation_method.
+
+        For perturbative extrapolation: extrapolate the :math:`\Psi_4` of all RadiationModes in the RadiationSphere at the set radius
+        for extrapolation to infinite radius and create and store a new RadiationSphere with those extrapolated RadiationModes. Uses
         the extrapolation method described in https://arxiv.org/abs/1008.4360 and https://arxiv.org/abs/1108.4421.
+
+        For cce extrapolation: use the data output from the cce output file as the extrapolated data and create
+        RadiationModes and a RadiationSphere object.
 
         Args:
             order (:obj:`int`, optional): the extrapolation order. Defaults to 2.
 
         """
-        if self.radius_for_extrapolation is None:
-            raise ValueError("Unable to create an extrapolated sphere because no radius for extrapolation is set. Please set with Coalescence.radius_for_extrapolation.")
-        warnings.warn("This extrapolation uses the formula given in https://arxiv.org/abs/1008.4360 which may not be accurate for all modes. Use with caution.")
-        radiation_sphere = self.radiation_spheres[self.radius_for_extrapolation]
-        extrap_sphere = radiation_sphere.get_extrapolated_sphere(order=order)
-        if extrap_sphere is None:
+        if self.extrapolation_method == ExtrapolationMethod.PERTURBATIVE:
+            if self.radius_for_extrapolation is None:
+                raise ValueError("Unable to create an extrapolated sphere because no radius for extrapolation is set. Please set with Coalescence.radius_for_extrapolation.")
+            warnings.warn("This extrapolation uses the formula given in https://arxiv.org/abs/1008.4360 which may not be accurate for all modes. Use with caution.")
+            radiation_sphere = self.radiation_spheres[self.radius_for_extrapolation]
+            extrap_sphere = radiation_sphere.get_extrapolated_sphere(order=order)
+            if extrap_sphere is None:
+                return
+            self.__extrapolated_spheres[ExtrapolationMethod.PERTURBATIVE] = extrap_sphere
+        if self.extrapolation_method == ExtrapolationMethod.ANALYTIC:
+            warnings.warn("Extrapolation via this method has not been implemented yet")
             return
-        self.__extrapolated_sphere = extrap_sphere
+        if self.extrapolation_method == ExtrapolationMethod.SPECTRE_CCE:
+            if self.spectre_cce_filename is None or self.cce_worldtube_radius is None:
+                warnings.warn("No SpECTRE CCE filename provided or no worldtube radius provided, unable to provide extrapolated data")
+                return
+            self._create_extrapolated_sphere_from_SpECTRE_CCE_data()
+        if self.extrapolation_method == ExtrapolationMethod.PITTNULL_CCE:
+            if self.pittnull_data_directory is None or self.cce_worldtube_radius is None:
+                warnings.warn("No PITTNull data directory provided or no worldtube radius provided, unable to provide extrapolated data")
+                return
+            self._create_extrapolated_sphere_from_PITTNull_CCE_data()
 
 
 class RadiationSphere:

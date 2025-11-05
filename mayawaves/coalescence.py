@@ -24,10 +24,26 @@ class Coalescence:
         object_numbers = [int(object_group[7:]) for object_group in self.__h5_file["compact_object"].keys()]
         for object_num in object_numbers:
             if object_num == 0 or object_num == 1:
-                irreducible_mass = self.__h5_file.attrs["irreducible mass %d" % object_num]
-                horizon_mass = self.__h5_file.attrs["horizon mass %d" % object_num]
-                dimensionless_spin = self.__h5_file.attrs["dimensionless spin %d" % object_num]
-                dimensional_spin = self.__h5_file.attrs["dimensional spin %d" % object_num]
+                try:
+                    irreducible_mass = self.__h5_file.attrs["irreducible mass %d" % object_num]
+                except:
+                    irreducible_mass = None
+
+                try:
+                    horizon_mass = self.__h5_file.attrs["horizon mass %d" % object_num]
+                except:
+                    horizon_mass = None
+
+                try:
+                    dimensionless_spin = self.__h5_file.attrs["dimensionless spin %d" % object_num]
+                except:
+                    dimensionless_spin = None
+
+                try:
+                    dimensional_spin = self.__h5_file.attrs["dimensional spin %d" % object_num]
+                except:
+                    dimensional_spin = None
+
             else:
                 irreducible_mass = None
                 horizon_mass = None
@@ -366,6 +382,38 @@ class Coalescence:
             center_of_mass = position_0 * initial_horizon_mass_0 + position_1 * initial_horizon_mass_1
 
             return time_pos, center_of_mass
+
+    @property
+    def extrapolation_method(self):
+        """Method to use for extrapolation to infinity."""
+        return self.radiationbundle.extrapolation_method
+
+    def set_extrapolation_method(self, method: str, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None):
+        """Set the method to use for extrapolation to infinity
+
+        Options are perturbative, analytic, spectre_cce, or pittnull_cce
+
+        Args:
+            method (str): Method to use for extrapolation
+            spectre_cce_filename (:obj:`str`, optional): Filename with the SpECTRE CCE output data
+            pittnull_data_directory (:obj:`str`, optional): Directory with PITTNull CCE output data
+            cce_worldtube_radius (:obj:`float`, optional): Radius of the CCE worldtube data
+            superrest_t0 (:obj:`float`, optional): Center of window for the superrest transformation
+            superrest_padding (:obj:`float`, optional): Padding to either side of t0 for the superrest transformation
+            superrest_orbits (:obj:`float`, optional): Number of orbits over which to compute the superrest transformation
+        """
+        from mayawaves.radiation import ExtrapolationMethod
+
+        if method == 'perturbative':
+            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.PERTURBATIVE)
+        elif method == 'analytic':
+            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.ANALYTIC)
+        elif method =='spectre_cce':
+            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.SPECTRE_CCE, spectre_cce_filename=spectre_cce_filename, cce_worldtube_radius=cce_worldtube_radius, superrest_t0=superrest_t0, superrest_padding=superrest_padding, superrest_orbits=superrest_orbits)
+        elif method =='pittnull_cce':
+            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.PITTNULL_CCE, pittnull_data_directory=pittnull_data_directory, cce_worldtube_radius=cce_worldtube_radius)
+        else:
+            warnings.warn("That is an invalid method for extrapolation. Please use perturbative, analytic, spectre_cce, or pittnull_cce")
 
     @property
     def radius_for_extrapolation(self):
