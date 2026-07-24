@@ -1137,6 +1137,30 @@ class Coalescence:
         """
         return self.__radiation_mode_bundle.get_psi4_max_time_for_mode(l, m, extraction_radius)
 
+    def quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int, extraction_radius: float = None) -> tuple:
+        """Get quasinormal mode properties for a specific multipole moment.
+        
+        Extracts the amplitude decay rate and oscillation frequency of the ringdown phase
+        of gravitational radiation for a specified (l, m) multipole moment by fitting a 
+        damped sinusoid to the late-time radiation data. This is a wrapper around the 
+        underlying RadiationBundle method.
+
+        Args:
+            l (int): Multipole moment index
+            m (int): Azimuthal index to specify a single mode
+            extraction_radius (:obj:`float`, optional): Extraction radius for gravitational wave data.
+                If not provided, uses the extrapolated-to-infinity data.
+
+        Returns:
+            tuple: (amplitude, decay_rate, frequency) where:
+                - amplitude (float): Initial amplitude of the damped sinusoid
+                - decay_rate (float): Exponential decay rate (1/time units) of the QNM
+                - frequency (float): Oscillation frequency of the QNM
+                Returns None if no data is available for the requested mode or radius.
+
+        """
+        return self.__radiation_mode_bundle.get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l, m, extraction_radius)
+
     def dEnergy_dt_radiated(self, lmin: int = None, lmax: int = None, l: int = None, m: int = None,
                             extraction_radius: float = None) -> tuple:
         """Rate at which energy is radiated in gravitational waves

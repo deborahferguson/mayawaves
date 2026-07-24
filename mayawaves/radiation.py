@@ -420,6 +420,42 @@ class RadiationBundle:
             return None
         return self.radiation_spheres[extraction_radius].get_psi4_max_time_for_mode(l=l, m=m)
 
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int,
+                                                                          extraction_radius: float = None) -> tuple:
+        """Get quasinormal mode properties for a specific multipole moment.
+        
+        Extracts the amplitude decay rate and oscillation frequency of the ringdown phase
+        of gravitational radiation for a specified (l, m) multipole moment by fitting a 
+        damped sinusoid to the late-time radiation data.
+        
+        Args:
+            l (int): Multipole moment index
+            m (int): Azimuthal index
+            extraction_radius (float, optional): Extraction radius for gravitational wave data.
+                If not provided, uses the extrapolated-to-infinity data.
+        
+        Returns:
+            tuple: (amplitude, decay_rate, frequency) where:
+                - amplitude (float): Initial amplitude of the damped sinusoid
+                - decay_rate (float): Exponential decay rate (1/time units) of the QNM
+                - frequency (float): Oscillation frequency of the QNM
+                Returns None if no data is available for the requested mode or radius.
+        
+        Raises:
+            UserWarning: If extrapolated-to-infinity data is requested but not available,
+                or if the requested extraction_radius has no data.
+        """
+        if extraction_radius is None:
+            if self.extrapolated_sphere is None:
+                warnings.warn("There is no data extrapolated to infinity for that mode")
+                return None
+            return self.extrapolated_sphere.get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m)
+        if extraction_radius not in self.radiation_spheres:
+            warnings.warn("There is no data at a radiation radius of {radius}M.".format(radius=extraction_radius))
+            return None
+        return self.radiation_spheres[
+            extraction_radius].get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m)
+
     def get_dEnergy_dt_radiated(self, extraction_radius: float = None, **kwargs) -> tuple:
         """Rate at which energy is radiated, :math:`dE/dt`
 
@@ -952,6 +988,32 @@ class RadiationSphere:
             warnings.warn("There is no l={l}, m={m} mode for this radiation sphere".format(l=l, m=m))
             return
         return self.modes[(l, m)].psi4_max_time
+
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int) -> tuple:
+        """Get quasinormal mode properties for a specific multipole moment at this extraction radius.
+        
+        Extracts the amplitude decay rate and oscillation frequency of the ringdown phase
+        of gravitational radiation for a specified (l, m) multipole moment by fitting a 
+        damped sinusoid to the late-time radiation data.
+        
+        Args:
+            l (int): Multipole moment index
+            m (int): Azimuthal index
+        
+        Returns:
+            tuple: (amplitude, decay_rate, frequency) where:
+                - amplitude (float): Initial amplitude of the damped sinusoid
+                - decay_rate (float): Exponential decay rate (1/time units) of the QNM
+                - frequency (float): Oscillation frequency of the QNM
+                Returns None if the requested (l, m) mode does not exist for this sphere.
+        
+        Raises:
+            UserWarning: If the requested mode (l, m) is not available for this extraction radius.
+        """
+        if (l, m) not in self.modes:
+            warnings.warn("There is no l={l}, m={m} mode for this radiation sphere".format(l=l, m=m))
+            return
+        return self.modes[(l, m)].get_quasinormal_mode_amplitude_decay_rate_and_frequency()
 
     def get_dEnergy_dt_radiated(self, **kwargs) -> tuple:
         """Rate at which energy is radiated, :math:`dE/dt`
@@ -1543,6 +1605,11 @@ class RadiationMode:
         return self.time[np.argmax(self.psi4_amplitude)]
 
     @property
+    def strain_max_time(self):
+        """The time at which the amplitude of :math:`\Psi_4` is at a maximum"""
+        return self.time[np.argmax(self.strain_amplitude)]
+
+    @property
     def h_plus_dot(self):
         """The real part of the first time derivative of the strain."""
         return np.gradient(self.strain_plus, self.time)
@@ -1856,3 +1923,176 @@ class RadiationMode:
         Y_lm = np.sqrt((2 * l + 1) / (4 * np.pi)) * d_lm * np.exp(1j * m * phi)
 
         return Y_lm
+
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency(self):
+        """Fit a damped sinusoid to extract quasinormal mode parameters.
+        
+        Analyzes the ringdown (late-time) phase of gravitational radiation by extracting
+        a window starting 20 time units after the strain maximum and fitting it to a 
+        damped sinusoid model: A * exp(-decay_rate * t) * cos(frequency * t + phase).
+        
+        The function uses FFT to estimate the oscillation frequency and envelope analysis
+        to estimate the decay rate, then performs nonlinear least-squares curve fitting
+        with scipy.optimize.curve_fit to extract precise values.
+        
+        Returns:
+            tuple: (amplitude, decay_rate, frequency) where:
+                - amplitude (float): Initial amplitude of the damped sinusoid
+                - decay_rate (float): Exponential decay rate (1/time units), related to the 
+                  quality factor by Q = π * frequency / decay_rate
+                - frequency (float): Oscillation frequency of the dominant quasinormal mode
+                Returns (None, None, None) if fitting fails or if the data amplitude is 
+                too small to fit reliably (< 1e-5).
+        
+        Note:
+            - The ringdown window is defined as 100 time units, starting 20 units after strain maximum
+            - Initial parameter guesses: amplitude from max strain value, decay rate from 
+              envelope decay analysis, frequency from FFT peak, and phase from 0
+            - Fitting bounds: amplitude ≥ 0, decay_rate ≥ 0, frequency ≥ 0, -π ≤ phase ≤ π
+        """
+        from scipy.optimize import curve_fit
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        time = self.time
+        strain_plus = self.strain_plus
+
+        max_time = self.strain_max_time
+        ringdown_start_time = max_time + 20
+        ringdown_start_iter = np.argmax(time >= ringdown_start_time)
+        ringdown_end_time = ringdown_start_time + 100
+        ringdown_end_iter = np.argmax(time >= ringdown_end_time)
+
+        ringdown_time = time[ringdown_start_iter:ringdown_end_iter]
+        ringdown_strain_plus = strain_plus[ringdown_start_iter:ringdown_end_iter]
+
+        # Shift time to start at 0
+        ringdown_time_shifted = ringdown_time - ringdown_time[0]
+
+        # Define damped sinusoid model
+        def damped_sinusoid(t, amplitude, decay_rate, frequency, phase):
+            """
+            Damped sinusoid: A * exp(-decay_rate * t) * cos(frequency*t + phase)
+
+            Args:
+                t: time array
+                amplitude: initial amplitude
+                decay_rate: exponential decay rate (1/time units)
+                frequency: oscillation frequency
+                phase: initial phase
+
+            Returns:
+                Strain values
+            """
+            return amplitude * np.exp(-decay_rate * t) * np.cos(frequency * t + phase)
+
+        # Initial guesses
+        # Amplitude: max value of absolute strain
+        amplitude_guess = np.max(np.abs(ringdown_strain_plus))
+        if amplitude_guess < 1e-5:
+            warnings.warn("Data is too small to effectively fit")
+            return None, None, None
+
+        # Decay rate: estimate from envelope decay
+        # Fit exp(-decay*t) to the envelope of the signal
+        abs_strain = np.abs(ringdown_strain_plus)
+        envelope_fit = np.polyfit(ringdown_time_shifted, np.log(abs_strain + 1e-20), 1)
+        decay_rate_guess = -envelope_fit[0]  # Should be positive
+        decay_rate_guess = max(decay_rate_guess, 1e-3)  # Ensure positive
+
+        # Frequency: use FFT on the ringdown portion
+        from scipy.fft import fft, fftfreq
+        fft_vals = fft(ringdown_strain_plus)
+        fft_freqs = fftfreq(len(ringdown_strain_plus), ringdown_time_shifted[1] - ringdown_time_shifted[0])
+        # Take positive frequencies only
+        positive_idx = fft_freqs > 0
+        frequency_guess = fft_freqs[positive_idx][np.argmax(np.abs(fft_vals[positive_idx]))]
+        frequency_guess = np.abs(frequency_guess) / (2*np.pi)
+
+        # Phase: initial guess
+        phase_guess = 0.0
+
+        # Perform curve fitting
+        try:
+            popt, pcov = curve_fit(
+                damped_sinusoid,
+                ringdown_time_shifted,
+                ringdown_strain_plus,
+                p0=[amplitude_guess, decay_rate_guess, frequency_guess, phase_guess],
+                maxfev=10000,
+                bounds=(
+                    [0, 0, 0, -np.pi],  # Lower bounds
+                    [np.inf, np.inf, np.inf, np.pi]  # Upper bounds
+                )
+            )
+
+            amplitude, decay_rate, frequency, phase = popt
+
+            # Extract uncertainties from covariance matrix
+            perr = np.sqrt(np.diag(pcov))
+
+        except RuntimeError as e:
+            print(f"Curve fitting failed: {e}")
+            return None, None, None
+
+        # # Plotting
+        # fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        #
+        # # Plot 1: Linear scale
+        # axes[0, 0].plot(ringdown_time, ringdown_strain_plus, 'b-', label='Data', linewidth=1.5)
+        # axes[0, 0].plot(ringdown_time, damped_sinusoid(ringdown_time_shifted, *popt),
+        #                 'r--', label='Fit', linewidth=1.5)
+        # axes[0, 0].set_xlabel('Time')
+        # axes[0, 0].set_ylabel('Strain')
+        # axes[0, 0].set_title('Ringdown: Linear Scale')
+        # axes[0, 0].legend()
+        # axes[0, 0].grid(True, alpha=0.3)
+        #
+        # # Plot 2: Log scale
+        # axes[0, 1].semilogy(ringdown_time, np.abs(ringdown_strain_plus), 'b-',
+        #                     label='Data', linewidth=1.5)
+        # axes[0, 1].semilogy(ringdown_time, np.abs(damped_sinusoid(ringdown_time_shifted, *popt)),
+        #                     'r--', label='Fit', linewidth=1.5)
+        # axes[0, 1].set_xlabel('Time')
+        # axes[0, 1].set_ylabel('|Strain|')
+        # axes[0, 1].set_title('Ringdown: Log Scale')
+        # axes[0, 1].legend()
+        # axes[0, 1].grid(True, alpha=0.3, which='both')
+        #
+        # # Plot 3: Envelope
+        # envelope_fit_vals = amplitude * np.exp(-decay_rate * ringdown_time_shifted)
+        # axes[1, 0].semilogy(ringdown_time, np.abs(ringdown_strain_plus), 'b-',
+        #                     label='Data', linewidth=1.5)
+        # axes[1, 0].semilogy(ringdown_time, envelope_fit_vals, 'g--',
+        #                     label='Envelope', linewidth=2)
+        # axes[1, 0].set_xlabel('Time')
+        # axes[1, 0].set_ylabel('|Strain|')
+        # axes[1, 0].set_title('Ringdown with Envelope')
+        # axes[1, 0].legend()
+        # axes[1, 0].grid(True, alpha=0.3, which='both')
+        #
+        # # Plot 4: Residuals
+        # residuals = ringdown_strain_plus - damped_sinusoid(ringdown_time_shifted, *popt)
+        # axes[1, 1].plot(ringdown_time, residuals, 'purple', linewidth=1)
+        # axes[1, 1].set_xlabel('Time')
+        # axes[1, 1].set_ylabel('Residuals')
+        # axes[1, 1].set_title('Fit Residuals')
+        # axes[1, 1].grid(True, alpha=0.3)
+        # axes[1, 1].axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        #
+        # plt.tight_layout()
+        # plt.show()
+        #
+        # # Print results
+        # print(f"\n{'=' * 60}")
+        # print(f"Ringdown Analysis Results:")
+        # print(f"{'=' * 60}")
+        # print(f"Amplitude:   {amplitude:.6e} ± {perr[0]:.6e}")
+        # print(f"Decay Rate:  {decay_rate:.6e} ± {perr[1]:.6e}")
+        # print(f"Frequency:   {frequency:.6e} ± {perr[2]:.6e}")
+        # print(f"Phase:       {phase:.6e} ± {perr[3]:.6e}")
+        # print(f"Quality factor Q: {np.pi * frequency / decay_rate:.2f}")
+        # print(f"Damping time (1/e): {1 / decay_rate:.6e}")
+        # print(f"{'=' * 60}\n")
+
+        return amplitude, decay_rate, frequency
