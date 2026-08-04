@@ -388,7 +388,7 @@ class Coalescence:
         """Method to use for extrapolation to infinity."""
         return self.radiationbundle.extrapolation_method
 
-    def set_extrapolation_method(self, method: str, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None):
+    def set_extrapolation_method(self, method: str, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None, radii_for_fitting: list = None):
         """Set the method to use for extrapolation to infinity
 
         Options are perturbative, analytic, spectre_cce, or pittnull_cce
@@ -401,13 +401,14 @@ class Coalescence:
             superrest_t0 (:obj:`float`, optional): Center of window for the superrest transformation
             superrest_padding (:obj:`float`, optional): Padding to either side of t0 for the superrest transformation
             superrest_orbits (:obj:`float`, optional): Number of orbits over which to compute the superrest transformation
+            radii_for_fitting (:obj:'list', optional): Radii to use for extrapolation fitting
         """
         from mayawaves.radiation import ExtrapolationMethod
 
         if method == 'perturbative':
             self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.PERTURBATIVE)
         elif method == 'analytic':
-            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.ANALYTIC)
+            self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.ANALYTIC, radii_for_fitting=radii_for_fitting)
         elif method =='spectre_cce':
             self.radiationbundle.set_extrapolation_method(ExtrapolationMethod.SPECTRE_CCE, spectre_cce_filename=spectre_cce_filename, cce_worldtube_radius=cce_worldtube_radius, superrest_t0=superrest_t0, superrest_padding=superrest_padding, superrest_orbits=superrest_orbits)
         elif method =='pittnull_cce':
@@ -863,23 +864,28 @@ class Coalescence:
             return None, None
 
         # rough estimate with initial velocity
-        time_momentum, momentum_vector = self.primary_compact_object.momentum_vector
-        if momentum_vector is None:
-            return -1, -1
-
-        initial_momentum = momentum_vector[0]
-        tangential_initial_momentum = initial_momentum[1]
-        qc_tangential_momentum = pn.tangential_momentum_from_separation(separation_magnitude[0], mass_ratio,
+        try:
+            time_momentum, momentum_vector = self.primary_compact_object.momentum_vector
+            if momentum_vector is None:
+                raise ValueError("No momentum vector to use to predict eccentricity")
+            # todo: get the initial momentum from the parameter file
+            
+            initial_momentum = momentum_vector[0]
+            tangential_initial_momentum = initial_momentum[1]
+            qc_tangential_momentum = pn.tangential_momentum_from_separation(separation_magnitude[0], mass_ratio,
                                                                         primary_dimensionless_spin,
                                                                         secondary_dimensionless_spin)
 
-        eps = 1 - tangential_initial_momentum / qc_tangential_momentum
+            eps = 1 - tangential_initial_momentum / qc_tangential_momentum
 
-        estimated_eccentricity = abs(2 * eps - eps ** 2)
+            estimated_eccentricity = abs(2 * eps - eps ** 2)
 
-        if estimated_eccentricity > 0.2:
-            warnings.warn("Estimated eccentricity is higher than 0.2 so the orbital frequncy fit won't be valid. Returning the eccentricity estimated from the initial momentum.")
-            return estimated_eccentricity, -1
+            if estimated_eccentricity > 0.2:
+                warnings.warn("Estimated eccentricity is higher than 0.2 so the orbital frequncy fit won't be valid. Returning the eccentricity estimated from the initial momentum.")
+                return estimated_eccentricity, -1
+
+        except ValueError:
+            print("Unable to estimate eccentricity. Moving on with trying to compute the eccentricity.")
 
         time_inspiral, orbital_frequency_inspiral = self._crop_to_three_or_four_orbits(start_time=start_time, time=time,
                                                                               orbital_phase=orbital_phase,

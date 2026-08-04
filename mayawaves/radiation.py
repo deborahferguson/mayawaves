@@ -6,6 +6,8 @@ import scipy.integrate
 from scipy.ndimage import uniform_filter1d
 from scipy.signal import butter, filtfilt
 from scipy.signal.windows import blackmanharris
+from scipy.interpolate import CubicSpline
+from scipy.optimize import curve_fit
 import math
 import os
 
@@ -36,6 +38,7 @@ class RadiationBundle:
         self.__superrest_t0 = None
         self.__superrest_padding = None
         self.__superrest_orbits = None
+        self.__radii_for_fitting = None
 
     @staticmethod
     def create_radiation_bundle(radiation_group: h5py.Group):
@@ -115,7 +118,7 @@ class RadiationBundle:
         """Method to use for extrapolation to infinite radius"""
         return self.__extrapolation_method
 
-    def set_extrapolation_method(self, new_extrapolation_method: ExtrapolationMethod, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None):
+    def set_extrapolation_method(self, new_extrapolation_method: ExtrapolationMethod, spectre_cce_filename: str = None, pittnull_data_directory: str = None, cce_worldtube_radius: float = None, superrest_t0: float = None, superrest_padding: float = None, superrest_orbits: float = None, radii_for_fitting: list = None):
         """Set the method to use for extrapolation to infinite radius.
 
         Options given by the ExtrapolationMethod enum are perturbative, analytic, or cauchy characteristic evolution.
@@ -129,6 +132,7 @@ class RadiationBundle:
             superrest_t0 (:obj:`float`, optional): Center of window for the superrest transformation
             superrest_padding (:obj:`float`, optional): Padding to either side of t0 for the superrest transformation
             superrest_orbits (:obj:`float`, optional): Number of orbits over which to compute the superrest transformation
+            radii_for_fitting (:obj:'list', optional): Radii to use for extrapolation fitting
 
         """
         if type(new_extrapolation_method) != ExtrapolationMethod:
@@ -139,10 +143,15 @@ class RadiationBundle:
         if new_extrapolation_method == ExtrapolationMethod.PITTNULL_CCE and (pittnull_data_directory is None or cce_worldtube_radius is None):
             warnings.warn("You must provide a pittnull_data_directory with the CCE output data and the cce_worldtube_radius for PITTNull CCE extrapolation method")
             return
+        if new_extrapolation_method == ExtrapolationMethod.ANALYTIC and radii_for_fitting is None:
+            warnings.warn("You must provide the radii to use for extrapolation fitting")
+            return
         if new_extrapolation_method == ExtrapolationMethod.SPECTRE_CCE and (not self.spectre_cce_filename == spectre_cce_filename or not self.superrest_t0 == superrest_t0 or not self.superrest_padding==superrest_padding or not self.superrest_orbits==superrest_orbits):
             self.__extrapolated_spheres[ExtrapolationMethod.SPECTRE_CCE] = None
         if new_extrapolation_method == ExtrapolationMethod.PITTNULL_CCE and not self.pittnull_data_directory == pittnull_data_directory:
             self.__extrapolated_spheres[ExtrapolationMethod.PITTNULL_CCE] = None
+        if new_extrapolation_method == ExtrapolationMethod.ANALYTIC and not self.radii_for_fitting == radii_for_fitting:
+            self.__extrapolated_spheres[ExtrapolationMethod.ANALYTIC] = None
         self.__extrapolation_method = new_extrapolation_method
         self.__spectre_cce_filename = spectre_cce_filename
         self.__pittnull_data_directory = pittnull_data_directory
@@ -150,6 +159,7 @@ class RadiationBundle:
         self.__superrest_t0 = superrest_t0
         self.__superrest_padding = superrest_padding
         self.__superrest_orbits = superrest_orbits
+        self.__radii_for_fitting = radii_for_fitting
         print(self.extrapolation_method)
 
     @property
@@ -181,6 +191,11 @@ class RadiationBundle:
         """The radius to be used for extrapolation to infinity."""
         return self.__radius_for_extrapolation
 
+    @property
+    def radii_for_fitting(self) -> list:
+        """The radii to use when using analytic fitting for extrapolation."""
+        return self.__radii_for_fitting
+    
     @radius_for_extrapolation.setter
     def radius_for_extrapolation(self, radius: float):
         """Set the radius to use when extrapolating to infinity
@@ -196,7 +211,7 @@ class RadiationBundle:
             return
         self.__radius_for_extrapolation = radius
         # reset extrapolated sphere so it uses the new radiation radius for extrapolation
-        self.__extrapolated_sphere = None
+        self.__extrapolated_spheres[self.__extrapolation_method] = None
 
     @property
     def l_max(self) -> int:
@@ -778,7 +793,7 @@ class RadiationBundle:
 
 
         plot_bondi_constraints(abd)
-        plot_bianchi_identities(abd)
+        #plot_bianchi_identities(abd)
 
         psi4 = abd.psi4
         time = h.t.copy()
@@ -815,6 +830,82 @@ class RadiationBundle:
         extrap_sphere = RadiationSphere(mode_dict=modes, time=psi4_time, radius=self.cce_worldtube_radius, extrapolated=True)
         self.__extrapolated_spheres[ExtrapolationMethod.PITTNULL_CCE] = extrap_sphere
 
+    def _create_extrapolated_sphere_from_multiple_radii(self):
+        print('creating extrapolated sphere using multiple radii')
+        modes = {}
+        for mode in self.included_modes:
+            l, m  = mode
+            print(l, m)
+            radii = sorted(self.radii_for_fitting)
+            radius_time_data = {}
+            for radius in radii:
+                time = self.get_time(extraction_radius=radius)
+                retarded_time = time - radius
+                radius_time_data[radius] = retarded_time
+                
+            min_time = radius_time_data[radii[0]][0]
+            max_time = radius_time_data[radii[-1]][-1]
+            dt = radius_time_data[radii[0]][1] - radius_time_data[radii[0]][0]
+            # print(min_time, max_time)
+            shared_time = np.arange(min_time, max_time, dt)
+            # print(shared_time)
+
+            # interpolate all the data to a common time
+            interpolated_data = {}
+            for radius in radii:
+                time = self.get_time(extraction_radius=radius)
+                strain_amplitude = self.get_strain_amplitude_for_mode(l=l, m=m, extraction_radius=radius)
+                strain_phase = self.get_strain_phase_for_mode(l=l, m=m, extraction_radius=radius)
+                retarded_time = time - radius
+                amp_spline = CubicSpline(retarded_time, strain_amplitude)
+                interpolated_amp = amp_spline(shared_time)
+                # import matplotlib.pyplot as plt
+                # plt.plot(retarded_time, strain_amplitude)
+                # plt.plot(shared_time, interpolated_amp)
+                # plt.show()
+                phase_spline = CubicSpline(retarded_time, strain_phase)
+                interpolated_phase = phase_spline(shared_time)
+                data = np.column_stack((interpolated_amp, interpolated_phase))
+                interpolated_data[radius] = data
+               #  print(data)
+            
+            # fit for the amplitude
+            def amp_fit_function(r, f_inf, A, B):
+                return f_inf + A/r + B/(r**2)
+
+            inf_amp = []
+            for i, time in enumerate(shared_time):
+                r_amps = []
+                for rad in radii:
+                    r_amps.append(interpolated_data[rad][:,0][i])
+                popt, pcov = curve_fit(amp_fit_function, radii, r_amps)
+                # print(popt)
+                inf_amp.append(popt[0])
+            
+            # fit for the phase
+            def phase_fit_function(r, f_inf, A):
+                return f_inf + A/r
+
+            inf_phase = []
+            for i, time in enumerate(shared_time):
+                phases = []
+                for rad in radii:
+                    phases.append(interpolated_data[rad][:,1][i])
+                popt, pcov = curve_fit(phase_fit_function, radii, phases)
+                # print(popt)
+                inf_phase.append(popt[0])
+
+            inf_amp = np.array(inf_amp)
+            inf_phase = np.array(inf_phase)
+            inf_strain = inf_amp*np.exp(1j*inf_phase)
+            inf_strain_plus = np.real(inf_strain)
+            inf_strain_cross = np.imag(inf_strain)
+            modes[(l, m)] = RadiationMode(strain_plus=inf_strain_plus, strain_cross=inf_strain_cross, rad=None, l=l, m=m,
+                                                           time=shared_time, extrapolated=True)
+        extrap_sphere = RadiationSphere(mode_dict=modes, time=shared_time, extrapolated=True, radius=None)
+        
+        self.__extrapolated_spheres[ExtrapolationMethod.ANALYTIC] = extrap_sphere
+        
     def create_extrapolated_sphere(self, order: int = 2):
         """Create a RadiationSphere object extrapolated to infinity using the set extrapolation_method.
 
@@ -839,8 +930,9 @@ class RadiationBundle:
                 return
             self.__extrapolated_spheres[ExtrapolationMethod.PERTURBATIVE] = extrap_sphere
         if self.extrapolation_method == ExtrapolationMethod.ANALYTIC:
-            warnings.warn("Extrapolation via this method has not been implemented yet")
-            return
+            self._create_extrapolated_sphere_from_multiple_radii()
+            #warnings.warn("Extrapolation via this method has not been implemented yet")
+            #return
         if self.extrapolation_method == ExtrapolationMethod.SPECTRE_CCE:
             if self.spectre_cce_filename is None or self.cce_worldtube_radius is None:
                 warnings.warn("No SpECTRE CCE filename provided or no worldtube radius provided, unable to provide extrapolated data")
