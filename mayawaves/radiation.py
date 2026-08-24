@@ -420,7 +420,7 @@ class RadiationBundle:
             return None
         return self.radiation_spheres[extraction_radius].get_psi4_max_time_for_mode(l=l, m=m)
 
-    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int,
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int, time_after_peak: float,
                                                                           extraction_radius: float = None) -> tuple:
         """Get quasinormal mode properties for a specific multipole moment.
         
@@ -431,6 +431,7 @@ class RadiationBundle:
         Args:
             l (int): Multipole moment index
             m (int): Azimuthal index
+            time_after_peak (float): time after peak to begin ringdown analysis
             extraction_radius (float, optional): Extraction radius for gravitational wave data.
                 If not provided, uses the extrapolated-to-infinity data.
         
@@ -449,12 +450,12 @@ class RadiationBundle:
             if self.extrapolated_sphere is None:
                 warnings.warn("There is no data extrapolated to infinity for that mode")
                 return None
-            return self.extrapolated_sphere.get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m)
+            return self.extrapolated_sphere.get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m, time_after_peak=time_after_peak)
         if extraction_radius not in self.radiation_spheres:
             warnings.warn("There is no data at a radiation radius of {radius}M.".format(radius=extraction_radius))
             return None
         return self.radiation_spheres[
-            extraction_radius].get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m)
+            extraction_radius].get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(l=l, m=m, time_after_peak=time_after_peak)
 
     def get_dEnergy_dt_radiated(self, extraction_radius: float = None, **kwargs) -> tuple:
         """Rate at which energy is radiated, :math:`dE/dt`
@@ -989,7 +990,7 @@ class RadiationSphere:
             return
         return self.modes[(l, m)].psi4_max_time
 
-    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int) -> tuple:
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency_for_mode(self, l: int, m: int, time_after_peak: float) -> tuple:
         """Get quasinormal mode properties for a specific multipole moment at this extraction radius.
         
         Extracts the amplitude decay rate and oscillation frequency of the ringdown phase
@@ -999,6 +1000,7 @@ class RadiationSphere:
         Args:
             l (int): Multipole moment index
             m (int): Azimuthal index
+            time_after_peak (float): time after peak to begin ringdown analysis
         
         Returns:
             tuple: (amplitude, decay_rate, frequency) where:
@@ -1013,7 +1015,7 @@ class RadiationSphere:
         if (l, m) not in self.modes:
             warnings.warn("There is no l={l}, m={m} mode for this radiation sphere".format(l=l, m=m))
             return
-        return self.modes[(l, m)].get_quasinormal_mode_amplitude_decay_rate_and_frequency()
+        return self.modes[(l, m)].get_quasinormal_mode_amplitude_decay_rate_and_frequency(time_after_peak=time_after_peak)
 
     def get_dEnergy_dt_radiated(self, **kwargs) -> tuple:
         """Rate at which energy is radiated, :math:`dE/dt`
@@ -1924,7 +1926,7 @@ class RadiationMode:
 
         return Y_lm
 
-    def get_quasinormal_mode_amplitude_decay_rate_and_frequency(self):
+    def get_quasinormal_mode_amplitude_decay_rate_and_frequency(self, time_after_peak: float):
         """Fit a damped sinusoid to extract quasinormal mode parameters.
         
         Analyzes the ringdown (late-time) phase of gravitational radiation by extracting
@@ -1934,6 +1936,9 @@ class RadiationMode:
         The function uses FFT to estimate the oscillation frequency and envelope analysis
         to estimate the decay rate, then performs nonlinear least-squares curve fitting
         with scipy.optimize.curve_fit to extract precise values.
+
+        Args:
+            time_after_peak (float): time after peak to start ringdown analysis
         
         Returns:
             tuple: (amplitude, decay_rate, frequency) where:
@@ -1958,7 +1963,7 @@ class RadiationMode:
         strain_plus = self.strain_plus
 
         max_time = self.strain_max_time
-        ringdown_start_time = max_time + 20
+        ringdown_start_time = max_time + time_after_peak
         ringdown_start_iter = np.argmax(time >= ringdown_start_time)
         ringdown_end_time = ringdown_start_time + 100
         ringdown_end_iter = np.argmax(time >= ringdown_end_time)
